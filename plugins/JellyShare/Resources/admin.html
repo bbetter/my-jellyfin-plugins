@@ -1,0 +1,376 @@
+<div id="JellyShareAdminPage" data-role="page" class="page type-interior pluginConfigurationPage">
+    <style>
+        .jellyshare-admin-container { padding: 24px; color: #ddd; }
+        .jellyshare-admin-container h1 { font-size: 20px; margin: 0 0 6px; color: #fff; }
+        .jellyshare-admin-container .subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
+        .jellyshare-admin-container button { cursor: pointer; border: none; border-radius: 4px; font-size: 12px; padding: 5px 11px; }
+        .jellyshare-admin-container .btn-refresh { background: #333; color: #ddd; font-size: 13px; padding: 7px 16px; margin-bottom: 18px; }
+        .jellyshare-admin-container .btn-copy { background: #00a4dc; color: #fff; }
+        .jellyshare-admin-container .btn-extend { background: #43a047; color: #fff; }
+        .jellyshare-admin-container .btn-revoke { background: #963030; color: #fff; }
+        .jellyshare-admin-container .btn-revoke.armed { background: #e74c3c; }
+        .jellyshare-admin-container button:disabled { opacity: 0.5; cursor: default; }
+        .jellyshare-admin-container table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+        .jellyshare-admin-container th { text-align: left; padding: 8px 12px; color: #888; border-bottom: 1px solid #2a2a2a; }
+        .jellyshare-admin-container td { padding: 8px 12px; border-bottom: 1px solid #1c1c1c; vertical-align: middle; }
+        .jellyshare-admin-container .td-url { max-width: 280px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #888; font-size: 12px; }
+        .jellyshare-admin-container .msg { color: #888; text-align: center; padding: 40px 0; font-size: 14px; }
+        .jellyshare-admin-container .err { color: #e74c3c; }
+        .jellyshare-admin-container .status { font-size: 13px; min-height: 18px; margin: 0 0 10px; color: #00a4dc; }
+        .jellyshare-admin-container .status.err { color: #e74c3c; }
+
+        #js-extend-overlay { display: none; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); z-index: 10000; align-items: center; justify-content: center; }
+        #js-extend-overlay.open { display: flex; }
+        #js-extend-overlay .js-modal { background: #1c1c1c; color: #ddd; border: 1px solid #2a2a2a; border-radius: 6px; padding: 20px 22px; width: min(340px, 90vw); box-sizing: border-box; font-size: 13px; box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5); margin: 0; }
+        #js-extend-overlay h2 { font-size: 16px; margin: 0 0 12px; color: #fff; }
+        #js-extend-overlay label { display: block; margin-bottom: 6px; color: #888; }
+        #js-extend-overlay input { width: 100%; box-sizing: border-box; background: #111; color: #fff; border: 1px solid #333; border-radius: 4px; padding: 7px 9px; font-size: 14px; }
+        #js-extend-overlay input:focus { outline: none; border-color: #00a4dc; }
+        #js-extend-overlay .js-modal-err { color: #e74c3c; min-height: 18px; margin: 8px 0 0; font-size: 12px; }
+        #js-extend-overlay .js-modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+        #js-extend-overlay button { cursor: pointer; border: none; border-radius: 4px; font-size: 13px; padding: 7px 16px; }
+        #js-extend-overlay button:disabled { opacity: 0.5; cursor: default; }
+        #js-extend-overlay .btn-cancel { background: #333; color: #ddd; }
+        #js-extend-overlay .btn-submit { background: #00a4dc; color: #fff; }
+    </style>
+
+    <div class="jellyshare-admin-container">
+        <h1>JellyShare</h1>
+        <p class="subtitle">Active share links.</p>
+        <button id="js-refresh-btn" class="btn-refresh">Refresh List</button>
+        <p id="js-status" class="status" role="status" aria-live="polite"></p>
+        <div id="js-root">
+            <p class="msg">Initializing...</p>
+        </div>
+    </div>
+
+    <script>
+        (function() {
+            console.log('JellyShare: Admin script init');
+
+            const COUNTDOWN_INTERVAL_MS = 60000;
+            const CONFIRM_TIMEOUT_MS = 4000;
+            const STATUS_TIMEOUT_MS = 4000;
+            const MAX_MINUTES = 10080;
+
+            let countdownTimer = null;
+            let statusTimer = null;
+            let overlay = null;
+            let extendToken = null;
+            let extendBusy = false;
+            let downOnBackdrop = false;
+
+            function getAuth() {
+                if (window.ApiClient && typeof window.ApiClient.accessToken === 'function')
+                    return window.ApiClient.accessToken();
+                try {
+                    const r = localStorage.getItem('jellyfin_credentials');
+                    if (r) return JSON.parse(r).Servers[0].AccessToken;
+                } catch(e) {}
+                return '';
+            }
+
+            function authHeaders() {
+                const token = getAuth();
+                return token ? { 'Authorization': 'MediaBrowser Token="' + token + '"' } : {};
+            }
+
+            function apiUrl(path) {
+                if (window.ApiClient && typeof window.ApiClient.getUrl === 'function')
+                    return window.ApiClient.getUrl(path);
+                return '/' + path;
+            }
+
+            function esc(s) {
+                return String(s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            function showStatus(text, isErr) {
+                const el = document.getElementById('js-status');
+                if (!el) return;
+                clearTimeout(statusTimer);
+                el.textContent = text;
+                el.className = isErr ? 'status err' : 'status';
+                if (!isErr) statusTimer = setTimeout(function() { el.textContent = ''; }, STATUS_TIMEOUT_MS);
+            }
+
+            function timeLeft(expMs, now) {
+                if (isNaN(expMs)) return 'unknown';
+                const mins = Math.floor((expMs - now) / 60000);
+                if (mins < 0) return 'expired';
+                return (mins < 60 ? mins + 'm' : Math.floor(mins / 60) + 'h') + ' left';
+            }
+
+            function stopCountdown() {
+                if (countdownTimer !== null) {
+                    clearInterval(countdownTimer);
+                    countdownTimer = null;
+                }
+            }
+
+            function refreshCountdowns() {
+                const root = document.getElementById('js-root');
+                const rows = root ? root.querySelectorAll('tr[data-expires]') : [];
+                if (!rows.length) {
+                    stopCountdown();
+                    return;
+                }
+                const now = Date.now();
+                rows.forEach(function(row) {
+                    const cell = row.querySelector('.expiry-left');
+                    if (cell) cell.textContent = timeLeft(Number(row.getAttribute('data-expires')), now);
+                });
+            }
+
+            function startCountdown() {
+                stopCountdown();
+                countdownTimer = setInterval(refreshCountdowns, COUNTDOWN_INTERVAL_MS);
+            }
+
+            function closeExtend() {
+                if (overlay) overlay.classList.remove('open');
+                extendToken = null;
+            }
+
+            function submitExtend(e) {
+                e.preventDefault();
+                if (extendBusy || !extendToken) return;
+
+                const input = document.getElementById('js-extend-minutes');
+                const errEl = document.getElementById('js-extend-err');
+                const submitBtn = document.getElementById('js-extend-submit');
+                const raw = String(input.value || '').trim();
+                const mins = /^\d+$/.test(raw) ? parseInt(raw, 10) : NaN;
+
+                if (isNaN(mins) || mins < 1 || mins > MAX_MINUTES) {
+                    errEl.textContent = 'Enter a whole number of minutes from 1 to ' + MAX_MINUTES + '.';
+                    input.focus();
+                    return;
+                }
+
+                const tok = extendToken;
+                extendBusy = true;
+                submitBtn.disabled = true;
+                errEl.textContent = '';
+
+                fetch(apiUrl('share/' + encodeURIComponent(tok) + '/extend'), {
+                    method: 'POST',
+                    headers: Object.assign({}, authHeaders(), { 'Content-Type': 'application/json' }),
+                    body: JSON.stringify({ additionalMinutes: mins })
+                }).then(function(res) {
+                    if (!res.ok) throw new Error('Status ' + res.status);
+                    closeExtend();
+                    showStatus('Link extended by ' + mins + ' min.');
+                    doLoad();
+                }).catch(function(err) {
+                    errEl.textContent = 'Failed: ' + (err.message || err);
+                }).then(function() {
+                    extendBusy = false;
+                    submitBtn.disabled = false;
+                });
+            }
+
+            function ensureOverlay() {
+                if (overlay && overlay.isConnected) return overlay;
+
+                const stale = document.getElementById('js-extend-overlay');
+                if (stale) stale.remove();
+
+                overlay = document.createElement('div');
+                overlay.id = 'js-extend-overlay';
+                overlay.innerHTML =
+                    '<form class="js-modal" id="js-extend-form">' +
+                        '<h2>Extend share link</h2>' +
+                        '<label for="js-extend-minutes">Minutes to add (1-' + MAX_MINUTES + ')</label>' +
+                        '<input type="number" id="js-extend-minutes" min="1" max="' + MAX_MINUTES + '" step="1" value="60">' +
+                        '<p class="js-modal-err" id="js-extend-err"></p>' +
+                        '<div class="js-modal-actions">' +
+                            '<button type="button" class="btn-cancel" id="js-extend-cancel">Cancel</button>' +
+                            '<button type="submit" class="btn-submit" id="js-extend-submit">Extend</button>' +
+                        '</div>' +
+                    '</form>';
+                document.body.appendChild(overlay);
+
+                overlay.querySelector('#js-extend-form').addEventListener('submit', submitExtend);
+                overlay.querySelector('#js-extend-cancel').addEventListener('click', closeExtend);
+                overlay.addEventListener('keydown', function(e) {
+                    if (e.key === 'Escape') closeExtend();
+                });
+                // Only close on backdrop click if the press also started on the backdrop
+                overlay.addEventListener('mousedown', function(e) {
+                    downOnBackdrop = e.target === overlay;
+                });
+                overlay.addEventListener('click', function(e) {
+                    if (downOnBackdrop && e.target === overlay) closeExtend();
+                    downOnBackdrop = false;
+                });
+                return overlay;
+            }
+
+            function openExtend(tok) {
+                const ov = ensureOverlay();
+                extendToken = tok;
+                const input = document.getElementById('js-extend-minutes');
+                document.getElementById('js-extend-err').textContent = '';
+                input.value = '60';
+                ov.classList.add('open');
+                input.focus();
+                input.select();
+            }
+
+            function disarmRevoke(btn) {
+                clearTimeout(btn._armTimer);
+                btn.dataset.armed = '';
+                btn.textContent = 'Revoke';
+                btn.classList.remove('armed');
+            }
+
+            async function doLoad() {
+                const root = document.getElementById('js-root');
+                if (!root) {
+                    console.error('JellyShare: js-root element not found');
+                    return;
+                }
+                stopCountdown();
+                root.innerHTML = '<p class="msg">Loading active shares...</p>';
+
+                try {
+                    const headers = authHeaders();
+                    const url = apiUrl('share/list');
+
+                    console.log('JellyShare: Fetching from ' + url);
+                    const res = await fetch(url, { headers: headers });
+
+                    if (!res.ok) throw new Error('Status ' + res.status);
+
+                    const data = await res.json();
+                    console.log('JellyShare: Received ' + (data ? data.length : 0) + ' links');
+
+                    if (!data || !data.length) {
+                        root.innerHTML = '<p class="msg">No active share links found.</p>';
+                        return;
+                    }
+
+                    let h = '<table><thead><tr><th>Media</th><th>URL</th><th>Expires</th><th></th></tr></thead><tbody>';
+                    const now = Date.now();
+
+                    for (let i = 0; i < data.length; i++) {
+                        const l = data[i];
+                        const t = l.token || l.Token;
+                        const n = l.itemName || l.ItemName || 'Unknown';
+                        const u = l.shareUrl || l.ShareUrl;
+                        const e = l.expiresAt || l.ExpiresAt;
+
+                        const expDate = new Date(e);
+                        const expMs = expDate.getTime();
+                        const expStr = expDate.toLocaleString();
+
+                        h += '<tr id="row-' + esc(t) + '" data-expires="' + expMs + '">' +
+                            '<td>' + esc(n) + '</td>' +
+                            '<td class="td-url" title="' + esc(u) + '">' + esc(u) + '</td>' +
+                            '<td>' + expStr + '<br><small class="expiry-left">' + timeLeft(expMs, now) + '</small></td>' +
+                            '<td>' +
+                                '<button class="btn-copy" data-url="' + esc(u) + '">Copy</button> ' +
+                                '<button class="btn-extend" data-token="' + esc(t) + '">Extend</button> ' +
+                                '<button class="btn-revoke" data-token="' + esc(t) + '">Revoke</button>' +
+                            '</td>' +
+                        '</tr>';
+                    }
+                    h += '</tbody></table>';
+                    root.innerHTML = h;
+                    startCountdown();
+
+                    root.querySelectorAll('.btn-copy').forEach(b => {
+                        b.onclick = function() {
+                            const btn = this;
+                            const val = btn.getAttribute('data-url');
+                            if (!navigator.clipboard || !navigator.clipboard.writeText) {
+                                showStatus('Copy failed: clipboard is not available in this context.', true);
+                                return;
+                            }
+                            navigator.clipboard.writeText(val).then(function() {
+                                btn.textContent = 'Copied!';
+                                setTimeout(function() { btn.textContent = 'Copy'; }, 2000);
+                                showStatus('Link copied to clipboard.');
+                            }).catch(function(err) {
+                                showStatus('Copy failed: ' + (err.message || err), true);
+                            });
+                        };
+                    });
+
+                    root.querySelectorAll('.btn-extend').forEach(b => {
+                        b.onclick = function() {
+                            openExtend(this.getAttribute('data-token'));
+                        };
+                    });
+
+                    root.querySelectorAll('.btn-revoke').forEach(b => {
+                        b.onclick = async function() {
+                            const btn = this;
+                            // First click arms the button; second click within the timeout revokes.
+                            if (btn.dataset.armed !== '1') {
+                                btn.dataset.armed = '1';
+                                btn.textContent = 'Confirm?';
+                                btn.classList.add('armed');
+                                clearTimeout(btn._armTimer);
+                                btn._armTimer = setTimeout(function() { disarmRevoke(btn); }, CONFIRM_TIMEOUT_MS);
+                                return;
+                            }
+                            clearTimeout(btn._armTimer);
+
+                            const tok = btn.getAttribute('data-token');
+                            btn.disabled = true;
+                            try {
+                                const r2 = await fetch(apiUrl('share/' + encodeURIComponent(tok)), { method: 'DELETE', headers: authHeaders() });
+                                if (!(r2.ok || r2.status === 404)) throw new Error('Status ' + r2.status);
+                                const row = document.getElementById('row-' + tok);
+                                if (row) row.remove();
+                                showStatus('Link revoked.');
+                            } catch (err) {
+                                disarmRevoke(btn);
+                                btn.disabled = false;
+                                showStatus('Revoke failed: ' + (err.message || err), true);
+                            }
+                        };
+                    });
+
+                } catch(err) {
+                    console.error('JellyShare load error:', err);
+                    root.innerHTML = '<p class="msg err">Error: ' + esc(err.message || err) + '</p>';
+                }
+            }
+
+            // Try to load immediately and on refresh button
+            setTimeout(doLoad, 100);
+
+            const btn = document.getElementById('js-refresh-btn');
+            if (btn) btn.onclick = doLoad;
+
+            // Also hook into Jellyfin's page events if possible
+            document.addEventListener('viewshow', function(e) {
+                if (e.target && e.target.id === 'JellyShareAdminPage') doLoad();
+            });
+
+            // Stop the countdown while the page is hidden; resume when it is shown again
+            function onPageHide(e) {
+                if (e.target && e.target.id === 'JellyShareAdminPage') {
+                    stopCountdown();
+                    closeExtend();
+                }
+            }
+            document.addEventListener('viewbeforehide', onPageHide);
+            document.addEventListener('viewhide', onPageHide);
+
+            document.addEventListener('visibilitychange', function() {
+                if (document.hidden) {
+                    stopCountdown();
+                    return;
+                }
+                if (document.querySelector('#js-root tr[data-expires]')) {
+                    refreshCountdowns();
+                    startCountdown();
+                }
+            });
+        })();
+    </script>
+</div>

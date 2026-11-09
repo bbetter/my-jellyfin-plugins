@@ -1,0 +1,12 @@
+# .NET
+obj/
+bin/
+publish/
+*.user
+*.suo
+
+# Tokens (sensitive)
+*.tokens.json
+
+# OS
+.DS_Store

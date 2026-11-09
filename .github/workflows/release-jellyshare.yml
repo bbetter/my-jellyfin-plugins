@@ -1,0 +1,86 @@
+name: Release JellyShare
+
+# Trigger: push a tag like jellyshare-v1.0.0
+on:
+  push:
+    tags:
+      - "jellyshare-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      PLUGIN_DIR: plugins/JellyShare
+      PLUGIN_GUID: 3a7b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d
+    steps:
+      - name: Check out tag
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          VERSION="${GITHUB_REF_NAME#jellyshare-v}"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Publish plugin
+        run: >
+          dotnet publish "$PLUGIN_DIR/JellyShare.csproj"
+          -c Release -o out -p:Version=${{ steps.ver.outputs.version }}
+
+      - name: Write meta.json and package zip
+        id: pkg
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          cat > out/meta.json <<EOF
+          {
+            "guid": "${PLUGIN_GUID}",
+            "name": "JellyShare",
+            "version": "${VERSION}",
+            "targetAbi": "10.10.0.0",
+            "overview": "Temporary public share links for media items",
+            "description": "Generate temporary public share links for media items.",
+            "owner": "${GITHUB_REPOSITORY_OWNER}",
+            "category": "General",
+            "changelog": "Release ${VERSION}"
+          }
+          EOF
+          ZIP="JellyShare-${VERSION}.zip"
+          (cd out && zip -j "../${ZIP}" JellyShare.dll meta.json)
+          echo "zip=${ZIP}" >> "$GITHUB_OUTPUT"
+          echo "md5=$(md5sum "${ZIP}" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub release with the zip
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+        run: |
+          gh release create "$TAG" "$ZIP" \
+            --title "JellyShare ${{ steps.ver.outputs.version }}" \
+            --notes "JellyShare ${{ steps.ver.outputs.version }}"
+
+      - name: Update manifest.json on main
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          ZIP: ${{ steps.pkg.outputs.zip }}
+          MD5: ${{ steps.pkg.outputs.md5 }}
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          SOURCE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${ZIP}"
+          python3 tools/update_manifest.py manifest.json out/meta.json "$SOURCE_URL" "$MD5"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "JellyShare ${VERSION}: update manifest"
+          git push origin main
