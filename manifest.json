@@ -1,1 +1,20 @@
-[]
+[
+  {
+    "guid": "3a7b2c1d-4e5f-6a7b-8c9d-0e1f2a3b4c5d",
+    "name": "JellyShare",
+    "description": "Generate temporary public share links for media items.",
+    "overview": "Temporary public share links for media items",
+    "owner": "bbetter",
+    "category": "General",
+    "versions": [
+      {
+        "version": "1.0.0",
+        "changelog": "Release 1.0.0",
+        "targetAbi": "10.10.0.0",
+        "sourceUrl": "https://github.com/bbetter/my-jellyfin-plugins/releases/download/jellyshare-v1.0.0/JellyShare-1.0.0.zip",
+        "checksum": "fc15be4c953f41eab0b58bfffb779d52",
+        "timestamp": "2026-11-09T02:51:16Z"
+      }
+    ]
+  }
+]
